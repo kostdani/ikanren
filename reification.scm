@@ -1,0 +1,90 @@
+
+(define-module (ikanren reification)
+  #:use-module (ikanren variables)
+  #:use-module (ikanren state)
+  #:use-module (ikanren unification)
+  #:use-module (ikanren substitution)
+  #:export (reify reify/initial-var))
+
+
+
+(define (reified-index index)
+  (string->symbol
+    (string-append "_." (number->string index))))
+
+(define (filter-not  pred lst) (filter (lambda (x) (not (pred x))) lst))
+(define (foldl/and proc acc lst)
+    (if (null? lst)
+        acc
+        (let ((new-acc (proc (car lst) acc)))
+            (and new-acc (foldl/and proc new-acc (cdr lst))))))
+
+(define (diseq-simplify st)
+    (let* ((n (state-n st))
+           (sub (state-sub st))
+           (diseq (state-cstore st))
+           (newst (mk-state n sub '())))
+        (foldl/and (lambda (=/=s cst) (disunify (map car =/=s) (map cdr =/=s) cst)) newst diseq)))
+(define (contains-fresh? x)
+    (if (pair? x)
+        (or (contains-fresh? (car x)) (contains-fresh? (cdr x)))
+        (var? x)))
+
+(define (pretty-diseq =/=s) 
+    (map (lambda (=/=) (let ((x (car =/=)) (y (cdr =/=)))
+                           (if (term<? x y) (list x y) (list y x))))
+         =/=s))
+
+(define (term<? u v)
+    (eqv? (term-compare u v) -1))
+
+;; Returns -1 if u < v, 0 if u = v, 1 if u > v
+;; Used for stylization
+(define (term-compare u v)
+    (cond
+     ((eqv? u v) 0)
+     ((null? u) -1)
+     ((null? v) 1)
+     ((not u) -1)
+     ((not v) 1)
+     ((eqv? u #t) -1)
+     ((eqv? v #t) 1)
+     ((symbol? u) (if (symbol? v) (if (string<? (symbol->string u) (symbol->string v)) -1 1) -1))
+     ((symbol? v) 1)
+     ((number? u) (if (number? v) (if (< u v) -1 1) -1))
+     ((number? v) 1)
+     ((string? u) (if (string? v) (if (string<? u v) -1 (if (string=? u v) 0 1)) -1))
+     ((string? v) 1)
+     ((pair? u) (if (pair? v) 
+                    (let ((compared-cars (term-compare (car u) (car v))))
+                        (if (eqv? compared-cars 0)
+                            (term-compare (cdr u) (cdr v))
+                            compared-cars))
+                    -1))
+     ((pair? v) 1)
+     (else 1)))
+
+(define (enum-vars tm sub)
+    (define index -1)
+    (let loop ((tm tm) (sub sub))
+              (define t (walk tm sub))
+              (cond ((pair? t) (loop (cdr t) (loop (car t) sub)))
+                    ((var? t)  (set! index (+ 1 index))
+                               (extend-sub t (reified-index index) sub))
+                    (else      sub))))
+
+(define (reify tm st)
+    (let ((results (enum-vars tm (state-sub st))))
+        (let* ((walked-sub (walk* tm results))
+               (diseq (map (lambda (=/=) (cons (length =/=) =/=)) (state-cstore st)))
+               (diseq (map cdr (sort diseq (lambda (x y) (< (car x) (car y))))))
+               (st (diseq-simplify (mk-state (state-n st) (state-sub st) diseq )))
+               (diseq (walk* (state-cstore st) results))
+               (diseq (map pretty-diseq (filter-not contains-fresh? diseq)))
+               (diseq (map (lambda (=/=) (sort =/= term<?)) diseq))
+               (diseq (if (null? diseq) '() (list (cons '=/= diseq)))))
+            (if (null? diseq)
+                walked-sub
+                (mk-cvar walked-sub (sort diseq term<?))))))
+(define (reify/initial-var st)
+  (reify initial-var st))
